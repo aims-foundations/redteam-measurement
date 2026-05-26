@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Cached upstream downloads — rebuilt by build.py
+*/raw/
+
+# Build outputs — rebuilt by build.py, kept off git like measurement-db does
+*/responses.parquet
+*/traces.parquet
+*/_contrib/
+
+# IDE / OS junk
+.DS_Store
+.vscode/
+.idea/

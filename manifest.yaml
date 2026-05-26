@@ -1,0 +1,50 @@
+# Datasets in this directory, gated for downstream use.
+# Mirrors aims-foundations/measurement-db manifest.yaml.
+
+datasets:
+  jailbreakbench:
+    status: ready
+    domain: safety
+    response_type: binary
+    source: https://github.com/JailbreakBench/artifacts
+    paper: https://arxiv.org/abs/2404.01318
+    notes: >
+      Six (attack_method, attack_type) conditions × 4 target models × 100
+      harmful behaviors. Sparse: white-box attacks (DSN, GCG/white_box) only
+      cover open-weight models (Llama-2, Vicuna).
+
+  harmbench:
+    status: ready
+    domain: safety
+    response_type: binary
+    source: https://github.com/centerforaisafety/HarmBench
+    paper: https://arxiv.org/abs/2402.04249
+    notes: >
+      16 attack methods × 2 behavior categories (standard, contextual) × 29
+      target models × 140 behaviors, with two judges per cell (HarmBench
+      Llama-2-13B classifier and the AdvBench refusal-string heuristic).
+      Pulled from the same JSONs that the HarmBench website playground reads.
+
+  strongreject:
+    status: ready
+    domain: safety
+    response_type: continuous_bounded
+    source: https://github.com/dsbowen/strong_reject
+    paper: https://arxiv.org/abs/2402.10260
+    notes: >
+      4 target models × 38 jailbreak methods × 313 forbidden prompts (47,576
+      cells, fully dense). Response is the continuous StrongREJECT rubric
+      composite in {0, 1/8, ..., 1}. Raw eval logs hosted on OSF
+      (https://osf.io/download/vyt73/).
+
+  donotanswer:
+    status: ready
+    domain: safety
+    response_type: mixed
+    source: https://huggingface.co/datasets/LibrAI/do-not-answer
+    paper: https://arxiv.org/abs/2308.13387
+    notes: >
+      6 target models × 939 refusal-worthy prompts asked directly (no attack
+      wrapper), 11,268 rows. Two labels per cell: `label=harmful` (binary)
+      and `label=action` (ordinal 0-5). Provides the no-attack baseline-
+      refusal axis missing from JBB/HB/StrongREJECT.
