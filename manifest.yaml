@@ -48,3 +48,26 @@ datasets:
       wrapper), 11,268 rows. Two labels per cell: `label=harmful` (binary)
       and `label=action` (ordinal 0-5). Provides the no-attack baseline-
       refusal axis missing from JBB/HB/StrongREJECT.
+
+  xstest:
+    status: ready
+    domain: safety
+    response_type: ordinal
+    source: https://github.com/paul-rottger/xstest
+    paper: https://arxiv.org/abs/2308.01263
+    notes: >
+      5 target models × 450 prompts (250 safe + 200 unsafe) with 5 judges
+      per cell (2 human annotators, consensus, GPT-4 judge, string-match).
+      11,239 rows. Tests *over-refusal* — the dual of the harm-compliance
+      axis covered by JBB/HB/StrongREJECT/DNA.
+
+  mhj:
+    status: ready
+    domain: safety
+    response_type: ordinal
+    source: https://huggingface.co/datasets/tom-gibbs/multi-turn_jailbreak_attack_datasets
+    paper: https://arxiv.org/abs/2408.15221
+    notes: >
+      8 frontier LLMs × 23 harmful goals × 2 ciphers × 2 turn-modes × 2
+      judges (Jailbroken, UTQ) = 1,528 rows. Adds the multi-turn
+      conversation axis. Response is ordinal 0/1/2.
