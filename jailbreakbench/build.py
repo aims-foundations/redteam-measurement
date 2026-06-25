@@ -12,6 +12,13 @@ Output:
   - responses.parquet                          # long-form, no trace column
   - traces.parquet                             # (subject, item, ..., trace) sidecar
   - _contrib/{subjects,items,benchmarks}.parquet  # registry contributions
+
+This is the reference implementation of a `BenchmarkBuild` subclass: all the
+shared plumbing (paths, download helper, registry registration, the
+unique-trials / trace-split / parquet-write tail, and `main()` orchestration)
+lives in ../build_base.py. This file supplies only what is unique to
+JailbreakBench: the `INFO` metadata, the artifact discovery/download URLs, and
+the `build_rows` parsing logic.
 """
 
 INFO = {
@@ -52,27 +59,10 @@ INFO = {
 
 import json
 import sys
-import urllib.request
 from pathlib import Path
 
-import pandas as pd
-
-_BENCHMARK_DIR = Path(__file__).resolve().parent
-RAW_DIR = _BENCHMARK_DIR / "raw"
-CONTRIB_DIR = _BENCHMARK_DIR / "_contrib"
-RESPONSES_PATH = _BENCHMARK_DIR / "responses.parquet"
-TRACES_PATH = _BENCHMARK_DIR / "traces.parquet"
-
-RAW_DIR.mkdir(exist_ok=True)
-
-sys.path.insert(0, str(_BENCHMARK_DIR.parent))
-from _registry import (  # noqa: E402
-    ensure_unique_trials,
-    get_benchmark_id,
-    register_item,
-    resolve_subject,
-    save as registry_save,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from build_base import BenchmarkBuild, register_item, resolve_subject  # noqa: E402
 
 ARTIFACTS_API = (
     "https://api.github.com/repos/JailbreakBench/artifacts/contents/attack-artifacts"
@@ -82,141 +72,71 @@ ARTIFACTS_RAW = (
 )
 
 
-def _download(url: str, dest: Path) -> Path:
-    if dest.exists() and dest.stat().st_size > 100:
-        return dest
-    print(f"  downloading {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(resp.read())
-    return dest
+class JailbreakBench(BenchmarkBuild):
+    INFO = INFO
+    slug = "jailbreakbench"
+    name = "JailbreakBench"
 
-
-def _list_api(url: str) -> list[dict]:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.load(resp)
-
-
-def discover_artifacts() -> list[tuple[str, str, str]]:
-    """Walk the artifacts repo and return (method, attack_type, model_filename)."""
-    out: list[tuple[str, str, str]] = []
-    for entry in _list_api(ARTIFACTS_API):
-        if entry["type"] != "dir" or entry["name"].startswith(".") or entry["name"] == "test-artifact":
-            continue
-        method = entry["name"]
-        for sub in _list_api(entry["url"]):
-            if sub["type"] != "dir":
+    def build_rows(self, bench_id: str) -> list[dict]:
+        # Walk the artifacts repo for every (method, attack_type, model) JSON file.
+        artifacts: list[tuple[str, str, str]] = []
+        for entry in self._get_json(ARTIFACTS_API):
+            if (
+                entry["type"] != "dir"
+                or entry["name"].startswith(".")
+                or entry["name"] == "test-artifact"
+            ):
                 continue
-            attack_type = sub["name"]
-            for f in _list_api(sub["url"]):
-                if f["type"] == "file" and f["name"].endswith(".json"):
-                    out.append((method, attack_type, f["name"]))
-    return out
+            method = entry["name"]
+            for sub in self._get_json(entry["url"]):
+                if sub["type"] != "dir":
+                    continue
+                attack_type = sub["name"]
+                for f in self._get_json(sub["url"]):
+                    if f["type"] == "file" and f["name"].endswith(".json"):
+                        artifacts.append((method, attack_type, f["name"]))
 
+        rows: list[dict] = []
+        missing_verdict = 0
 
-def load_artifact(method: str, attack_type: str, fname: str) -> dict:
-    dest = RAW_DIR / method / attack_type / fname
-    url = f"{ARTIFACTS_RAW}/{method}/{attack_type}/{fname}"
-    _download(url, dest)
-    return json.loads(dest.read_text())
-
-
-def build_long_form(artifacts: list[tuple[str, str, str]]) -> pd.DataFrame:
-    bench_id = get_benchmark_id(
-        "jailbreakbench",
-        name="JailbreakBench",
-        license=INFO["license"],
-        source_url=INFO["data_source_url"],
-        description=INFO["description"],
-        modality=INFO["modality"],
-        domain=INFO["domain"],
-        response_type=INFO["response_type"],
-        response_scale=INFO["response_scale"],
-        categorical=INFO["categorical"],
-        paper_url=INFO["paper_url"],
-        release_date=INFO["release_date"],
-    )
-
-    rows: list[dict] = []
-    missing_verdict = 0
-
-    for method, attack_type, fname in artifacts:
-        try:
-            data = load_artifact(method, attack_type, fname)
-        except Exception as e:
-            print(f"  skip {method}/{attack_type}/{fname}: {e}")
-            continue
-
-        params = data.get("parameters", {})
-        raw_model = params.get("model") or fname.removesuffix(".json")
-        subj = resolve_subject(raw_model)
-        condition = f"attack={method};attack_type={attack_type}"
-
-        for jb in data.get("jailbreaks", []):
-            goal = jb.get("goal")
-            if goal is None:
-                continue
-            jailbroken = jb.get("jailbroken")
-            if jailbroken is None:
-                missing_verdict += 1
+        for method, attack_type, fname in artifacts:
+            dest = self.raw_dir / method / attack_type / fname
+            try:
+                self._download(f"{ARTIFACTS_RAW}/{method}/{attack_type}/{fname}", dest)
+                data = json.loads(dest.read_text())
+            except Exception:
                 continue
 
-            item = register_item(
-                benchmark_id=bench_id,
-                raw_item_id=str(jb.get("index")),
-                content=goal,
-            )
-            rows.append({
-                "subject_id": subj,
-                "item_id": item,
-                "benchmark_id": bench_id,
-                "trial": 1,
-                "test_condition": condition,
-                "response": float(bool(jailbroken)),
-                "correct_answer": None,
-                "trace": jb.get("response"),
-            })
+            params = data.get("parameters", {})
+            raw_model = params.get("model") or fname.removesuffix(".json")
+            subj = resolve_subject(raw_model)
+            condition = f"attack={method};attack_type={attack_type}"
 
-    if missing_verdict:
-        print(f"  WARNING: {missing_verdict} (model, behavior) cells had no verdict")
+            for jb in data.get("jailbreaks", []):
+                goal = jb.get("goal")
+                if goal is None:
+                    continue
+                jailbroken = jb.get("jailbroken")
+                if jailbroken is None:
+                    missing_verdict += 1
+                    continue
 
-    df = pd.DataFrame(rows)
-    df = ensure_unique_trials(df)
-
-    # Split traces from responses.
-    trace_cols = ["subject_id", "item_id", "benchmark_id", "trial", "test_condition", "trace"]
-    traces = df.loc[df["trace"].notna(), trace_cols].copy()
-
-    resp = df.copy()
-    resp["trace"] = None
-    resp.to_parquet(RESPONSES_PATH, index=False)
-    registry_save(CONTRIB_DIR)
-    print(f"  wrote {RESPONSES_PATH.name} ({len(resp):,} rows)")
-    print(f"  wrote {CONTRIB_DIR.name}/{{subjects,items,benchmarks}}.parquet")
-    if len(traces) > 0:
-        traces.to_parquet(TRACES_PATH, index=False)
-        print(f"  wrote {TRACES_PATH.name} ({len(traces):,} rows)")
-    return df
-
-
-def print_stats(df: pd.DataFrame) -> None:
-    print(f"\n  subjects: {df['subject_id'].nunique()}")
-    print(f"  items:    {df['item_id'].nunique()}")
-    print(f"  rows:     {len(df):,}")
-    print(f"  test_conditions: {df['test_condition'].nunique()}")
-    print(f"  response mean (overall jailbreak rate): {df['response'].mean():.3f}")
-
-
-def main() -> None:
-    print(f"[jailbreakbench] building from {_BENCHMARK_DIR}")
-    print("  discovering artifacts...")
-    artifacts = discover_artifacts()
-    print(f"  found {len(artifacts)} (method, attack_type, model) triples")
-    df = build_long_form(artifacts)
-    print_stats(df)
-
+                item = register_item(
+                    benchmark_id=bench_id,
+                    raw_item_id=str(jb.get("index")),
+                    content=goal,
+                )
+                rows.append({
+                    "subject_id": subj,
+                    "item_id": item,
+                    "benchmark_id": bench_id,
+                    "trial": 1,
+                    "test_condition": condition,
+                    "response": float(bool(jailbroken)),
+                    "correct_answer": None,
+                    "trace": jb.get("response"),
+                })
+        return rows
 
 if __name__ == "__main__":
-    main()
+    JailbreakBench(__file__).main()

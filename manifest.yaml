@@ -20,10 +20,14 @@ datasets:
     source: https://github.com/centerforaisafety/HarmBench
     paper: https://arxiv.org/abs/2402.04249
     notes: >
-      16 attack methods × 2 behavior categories (standard, contextual) × 29
-      target models × 140 behaviors, with two judges per cell (HarmBench
-      Llama-2-13B classifier and the AdvBench refusal-string heuristic).
-      Pulled from the same JSONs that the HarmBench website playground reads.
+      16 attack methods × 29 target models × 140 behaviors, with two judges per
+      cell (HarmBench Llama-2-13B classifier and the AdvBench refusal-string
+      heuristic) = 31 conditions, 104,194 rows. Behaviors span all three
+      functional categories (57 standard, 48 copyright, 35 contextual), recorded
+      on the items registry (NOT in test_condition). This is the 140-behavior
+      website-playground subset of HarmBench's 400 textual behaviors; the
+      AdvBench judge is absent for TAP-T. Pulled from the same JSONs the
+      HarmBench website playground reads.
 
   strongreject:
     status: ready

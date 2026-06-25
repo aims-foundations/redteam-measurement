@@ -5,15 +5,26 @@ Data sources (the same files the playground at https://www.harmbench.org/ fetche
         playground_data/metadata_text.json       # methods + models manifest
         playground_data/text_behaviors.json      # behavior text + categories
         playground_data/standard/<METHOD>.json   # per-attack results
-        playground_data/contextual/<METHOD>.json # contextual-attack results
 
 Layout of each <METHOD>.json:
     {behavior_id: {model_id: {test_case, generation, label, advbench_label}}}
+
+NOTE ON THE `standard/`, `contextual/`, `copyright/` DIRECTORIES: in the upstream
+playground repo these are **byte-identical copies** of the same full result set —
+each <METHOD>.json contains *all* 140 behaviors regardless of folder (verified:
+standard/PAIR.json holds 57 standard + 48 copyright + 35 contextual behaviors).
+The folder name does NOT encode a behavior category; the website filters
+client-side on each behavior's `FunctionalCategory` field. So we read a single
+directory (`SOURCE_CATEGORY`) and take each behavior's true category from
+`text_behaviors.json`, attaching it to the item — NOT to `test_condition`.
 
 `label` is the HarmBench classifier verdict (Llama-2-13B fine-tuned judge).
 `advbench_label` is the AdvBench refusal-string heuristic. We emit both as
 separate `test_condition`s so the paper's measurement model can compare
 judges as well as attackers.
+
+Coverage caveat: this is the 140-behavior website subset of HarmBench's 400
+textual behaviors (no multimodal); the AdvBench judge is absent for TAP-T.
 
 Output:
   - raw/<category>/<METHOD>.json, raw/metadata_text.json, raw/text_behaviors.json
@@ -24,16 +35,19 @@ Output:
 
 INFO = {
     'description': (
-        'HarmBench standardized red-teaming results: ~29 target models x 140 '
+        'HarmBench standardized red-teaming results: 29 target models x 140 '
         'behaviors x 16 attack methods, with the HarmBench Llama-2-13B '
         'classifier verdict and the AdvBench refusal-string heuristic as two '
-        'separate judges. Covers the standard and contextual behavior '
-        'categories from the HarmBench website playground.'
+        'separate judges. The 140 behaviors are the website-playground subset '
+        'of HarmBench\'s 400 textual behaviors and span all three functional '
+        'categories (standard, contextual, copyright); each behavior\'s '
+        'FunctionalCategory is recorded on the item.'
     ),
     'testing_condition': (
-        'test_condition is "attack=<method>;category=<standard|contextual>;'
-        'judge=<harmbench|advbench>". Each (model, behavior) cell appears under '
-        'multiple attacks and multiple judges.'
+        'test_condition is "attack=<method>;judge=<harmbench|advbench>". Each '
+        '(model, behavior) cell appears under multiple attacks and both judges. '
+        'A behavior\'s functional category (standard/contextual/copyright) is an '
+        'item property, not a condition, and lives on the items registry.'
     ),
     'paper_url': 'https://arxiv.org/abs/2402.04249',
     'data_source_url': 'https://github.com/centerforaisafety/HarmBench',
@@ -58,27 +72,10 @@ INFO = {
 
 import json
 import sys
-import urllib.request
 from pathlib import Path
 
-import pandas as pd
-
-_BENCHMARK_DIR = Path(__file__).resolve().parent
-RAW_DIR = _BENCHMARK_DIR / "raw"
-CONTRIB_DIR = _BENCHMARK_DIR / "_contrib"
-RESPONSES_PATH = _BENCHMARK_DIR / "responses.parquet"
-TRACES_PATH = _BENCHMARK_DIR / "traces.parquet"
-
-RAW_DIR.mkdir(exist_ok=True)
-
-sys.path.insert(0, str(_BENCHMARK_DIR.parent))
-from _registry import (  # noqa: E402
-    ensure_unique_trials,
-    get_benchmark_id,
-    register_item,
-    resolve_subject,
-    save as registry_save,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from build_base import BenchmarkBuild, register_item, resolve_subject  # noqa: E402
 
 DATA_REPO = "justinphan3110cais/harmbench_website"
 DATA_BRANCH = "data"
@@ -87,185 +84,119 @@ DATA_BASE = (
 )
 API_BASE = f"https://api.github.com/repos/{DATA_REPO}/contents/playground_data"
 
-CATEGORIES = ("standard", "contextual")  # multimodal/copyright skipped; text-only for now
+# The playground ships standard/, contextual/, copyright/ as identical copies of
+# the full result set (see module docstring). We read exactly one of them; the
+# behavior's real category comes from text_behaviors.json's FunctionalCategory.
+SOURCE_CATEGORY = "standard"
 
 
-def _download(url: str, dest: Path) -> Path:
-    if dest.exists() and dest.stat().st_size > 100:
-        return dest
-    print(f"  downloading {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(resp.read())
-    return dest
+class HarmBench(BenchmarkBuild):
+    INFO = INFO
+    slug = "harmbench"
+    name = "HarmBench"
 
+    def _load_json(self, rel: str) -> object:
+        """Download playground_data/<rel> into raw/ (cached) and parse it."""
+        dest = self.raw_dir / rel
+        self._download(f"{DATA_BASE}/{rel}", dest)
+        return json.loads(dest.read_text())
 
-def _list_api(path: str) -> list[dict]:
-    url = f"{API_BASE}/{path}?ref={DATA_BRANCH}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.load(resp)
-
-
-def load_json(rel: str) -> object:
-    dest = RAW_DIR / rel
-    _download(f"{DATA_BASE}/{rel}", dest)
-    return json.loads(dest.read_text())
-
-
-def discover_method_files() -> list[tuple[str, str]]:
-    """Return list of (category, method_name) for every <METHOD>.json file."""
-    out: list[tuple[str, str]] = []
-    for category in CATEGORIES:
+    def _discover_method_files(self) -> list[str]:
+        """Return the method name for every <METHOD>.json in SOURCE_CATEGORY."""
+        out: list[str] = []
         try:
-            entries = _list_api(category)
-        except Exception as e:
-            print(f"  could not list {category}/: {e}")
-            continue
+            entries = self._get_json(f"{API_BASE}/{SOURCE_CATEGORY}?ref={DATA_BRANCH}")
+        except Exception:
+            return out
         for entry in entries:
             if entry["type"] != "file" or not entry["name"].endswith(".json"):
                 continue
-            method = entry["name"].removesuffix(".json")
-            out.append((category, method))
-    return out
+            out.append(entry["name"].removesuffix(".json"))
+        return out
 
-
-def build_long_form(method_files: list[tuple[str, str]]) -> pd.DataFrame:
-    bench_id = get_benchmark_id(
-        "harmbench",
-        name="HarmBench",
-        license=INFO["license"],
-        source_url=INFO["data_source_url"],
-        description=INFO["description"],
-        modality=INFO["modality"],
-        domain=INFO["domain"],
-        response_type=INFO["response_type"],
-        response_scale=INFO["response_scale"],
-        categorical=INFO["categorical"],
-        paper_url=INFO["paper_url"],
-        release_date=INFO["release_date"],
-    )
-
-    # Load behavior content for the items registry.
-    behaviors = load_json("text_behaviors.json")
-    behavior_text: dict[str, dict] = {
-        b["BehaviorID"]: b for b in behaviors if "BehaviorID" in b
-    }
-    # Pre-register so item_ids are stable even for behaviors with no responses.
-    for bid, b in behavior_text.items():
-        register_item(
-            benchmark_id=bench_id,
-            raw_item_id=bid,
-            content=b.get("Behavior") or bid,
-        )
-
-    rows: list[dict] = []
-    skipped_no_label = 0
-
-    for category, method in method_files:
-        rel = f"{category}/{method}.json"
-        try:
-            data = load_json(rel)
-        except Exception as e:
-            print(f"  skip {rel}: {e}")
-            continue
-
-        for behavior_id, by_model in data.items():
-            if not isinstance(by_model, dict):
-                continue
-            content = (
-                behavior_text.get(behavior_id, {}).get("Behavior") or behavior_id
-            )
-            item = register_item(
+    def build_rows(self, bench_id: str) -> list[dict]:
+        # Load behavior content for the items registry.
+        behaviors = self._load_json("text_behaviors.json")
+        behavior_text: dict[str, dict] = {
+            b["BehaviorID"]: b for b in behaviors if "BehaviorID" in b
+        }
+        # Pre-register so item_ids are stable even for behaviors with no responses.
+        # The behavior's true FunctionalCategory (standard/contextual/copyright)
+        # is an intrinsic item property and is attached here.
+        for bid, b in behavior_text.items():
+            register_item(
                 benchmark_id=bench_id,
-                raw_item_id=behavior_id,
-                content=content,
+                raw_item_id=bid,
+                content=b.get("Behavior") or bid,
+                category=b.get("FunctionalCategory"),
             )
 
-            for model_id, cell in by_model.items():
-                if not isinstance(cell, dict):
+        rows: list[dict] = []
+
+        for method in self._discover_method_files():
+            rel = f"{SOURCE_CATEGORY}/{method}.json"
+            try:
+                data = self._load_json(rel)
+            except Exception:
+                continue
+
+            for behavior_id, by_model in data.items():
+                if not isinstance(by_model, dict):
                     continue
-                subj = resolve_subject(model_id)
-                test_case = cell.get("test_case")
-                generation = cell.get("generation")
+                content = (
+                    behavior_text.get(behavior_id, {}).get("Behavior") or behavior_id
+                )
+                item = register_item(
+                    benchmark_id=bench_id,
+                    raw_item_id=behavior_id,
+                    content=content,
+                    category=behavior_text.get(behavior_id, {}).get(
+                        "FunctionalCategory"
+                    ),
+                )
 
-                for judge, key in (("harmbench", "label"), ("advbench", "advbench_label")):
-                    verdict = cell.get(key)
-                    if verdict is None:
-                        skipped_no_label += 1
+                for model_id, cell in by_model.items():
+                    if not isinstance(cell, dict):
                         continue
-                    try:
-                        response = float(int(verdict))
-                    except (TypeError, ValueError):
-                        skipped_no_label += 1
-                        continue
+                    subj = resolve_subject(model_id)
+                    test_case = cell.get("test_case")
+                    generation = cell.get("generation")
 
-                    condition = (
-                        f"attack={method};category={category};judge={judge}"
-                    )
-                    # Encode the attack prompt (which differs per (behavior, model,
-                    # attack)) and the model's generation into a single trace blob.
-                    if isinstance(test_case, list):
-                        test_case_text = "\n".join(str(x) for x in test_case)
-                    else:
-                        test_case_text = test_case
-                    trace = None
-                    if generation or test_case_text:
-                        trace = json.dumps(
-                            {"test_case": test_case_text, "generation": generation},
-                            ensure_ascii=False,
-                        )
+                    for judge, key in (("harmbench", "label"), ("advbench", "advbench_label")):
+                        verdict = cell.get(key)
+                        if verdict is None:
+                            continue
+                        try:
+                            response = float(int(verdict))
+                        except (TypeError, ValueError):
+                            continue
 
-                    rows.append({
-                        "subject_id": subj,
-                        "item_id": item,
-                        "benchmark_id": bench_id,
-                        "trial": 1,
-                        "test_condition": condition,
-                        "response": response,
-                        "correct_answer": None,
-                        "trace": trace,
-                    })
+                        condition = f"attack={method};judge={judge}"
+                        # Encode the attack prompt (which differs per (behavior, model,
+                        # attack)) and the model's generation into a single trace blob.
+                        if isinstance(test_case, list):
+                            test_case_text = "\n".join(str(x) for x in test_case)
+                        else:
+                            test_case_text = test_case
+                        trace = None
+                        if generation or test_case_text:
+                            trace = json.dumps(
+                                {"test_case": test_case_text, "generation": generation},
+                                ensure_ascii=False,
+                            )
 
-    if skipped_no_label:
-        print(f"  WARNING: {skipped_no_label} cells had no usable label")
-
-    df = pd.DataFrame(rows)
-    df = ensure_unique_trials(df)
-
-    trace_cols = ["subject_id", "item_id", "benchmark_id", "trial", "test_condition", "trace"]
-    traces = df.loc[df["trace"].notna(), trace_cols].copy()
-
-    resp = df.copy()
-    resp["trace"] = None
-    resp.to_parquet(RESPONSES_PATH, index=False)
-    registry_save(CONTRIB_DIR)
-    print(f"  wrote {RESPONSES_PATH.name} ({len(resp):,} rows)")
-    print(f"  wrote {CONTRIB_DIR.name}/{{subjects,items,benchmarks}}.parquet")
-    if len(traces) > 0:
-        traces.to_parquet(TRACES_PATH, index=False)
-        print(f"  wrote {TRACES_PATH.name} ({len(traces):,} rows)")
-    return df
-
-
-def print_stats(df: pd.DataFrame) -> None:
-    print(f"\n  subjects: {df['subject_id'].nunique()}")
-    print(f"  items:    {df['item_id'].nunique()}")
-    print(f"  rows:     {len(df):,}")
-    print(f"  test_conditions: {df['test_condition'].nunique()}")
-    print(f"  response mean (HarmBench judge only): "
-          f"{df.loc[df['test_condition'].str.contains('judge=harmbench'), 'response'].mean():.3f}")
-
-
-def main() -> None:
-    print(f"[harmbench] building from {_BENCHMARK_DIR}")
-    print("  discovering method files...")
-    method_files = discover_method_files()
-    print(f"  found {len(method_files)} (category, method) result files")
-    df = build_long_form(method_files)
-    print_stats(df)
+                        rows.append({
+                            "subject_id": subj,
+                            "item_id": item,
+                            "benchmark_id": bench_id,
+                            "trial": 1,
+                            "test_condition": condition,
+                            "response": response,
+                            "correct_answer": None,
+                            "trace": trace,
+                        })
+        return rows
 
 
 if __name__ == "__main__":
-    main()
+    HarmBench(__file__).main()
