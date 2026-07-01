@@ -62,8 +62,6 @@ v_hat = torch.zeros(K, requires_grad=True)
 j_hat = torch.zeros(J, requires_grad=True) # per-judge effect; ONE per judge (J judges)
 # b_hat = torch.ones(K, requires_grad=True) # per-attacker discrimination; ONE per attacker, like v_hat
 
-breakpoint()
-
 # class balance: fraction of 1s (jailbroken) in each set
 # print("train mean response:", y_tr.mean().item())
 # print("test  mean response:", y_te.mean().item())
